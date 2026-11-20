@@ -10,10 +10,13 @@ import { writePackageDistInventory } from "../../scripts/lib/package-dist-invent
 import { createStateSchemaInlinePlugin } from "../../scripts/lib/state-schema-inline-plugin.mts";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { writePackageRoot } from "./package-update-steps.test-support.js";
+import { runtimeProcessEntrypoints } from "./runtime-process-entrypoints.js";
 
 const exec = promisify(execFile);
 const schemas = createStateSchemaInlinePlugin();
 const dirs = useAutoCleanupTempDirTracker(afterEach);
+const localOverrideWorker = runtimeProcessEntrypoints.packageLocalOverrides;
+const localOverrideWorkerPackagePath = path.posix.join("dist", localOverrideWorker.distWorkerPath);
 
 // Copy the real published JS and available native packages into the installation.
 // No repository node_modules link may keep the moved updater's dependencies alive.
@@ -136,7 +139,7 @@ it.each(["success", "doctor failure", "unchanged", "legacy", "late recovery refu
           setup(bundle) {
             bundle.onLoad({ filter: /./ }, ({ path: modulePath }) => {
               // This is a one-shot build, not a watched esbuild context.
-              const result = schemas.load.call({ addWatchFile() {} }, modulePath);
+              const result = schemas.load.handler.call({ addWatchFile() {} }, modulePath);
               return result ? { contents: result.code, loader: result.moduleType } : undefined;
             });
           },
@@ -146,6 +149,15 @@ it.each(["success", "doctor failure", "unchanged", "legacy", "late recovery refu
       banner: {
         js: 'import { createRequire as createFixtureRequire } from "node:module"; const require = createFixtureRequire(import.meta.url);',
       },
+      logLevel: "silent",
+    });
+    await build({
+      entryPoints: [path.resolve(localOverrideWorker.sourceModulePath)],
+      outfile: path.join(source, ...localOverrideWorkerPackagePath.split("/")),
+      bundle: true,
+      platform: "node",
+      format: "esm",
+      target: "node22",
       logLevel: "silent",
     });
     await fs.cp(source, candidateSource, { recursive: true });
@@ -165,7 +177,7 @@ it.each(["success", "doctor failure", "unchanged", "legacy", "late recovery refu
         await fs.rm(path.join(directory, "dist/postinstall-content-inventory.json"));
         await fs.writeFile(
           path.join(directory, "dist/postinstall-inventory.json"),
-          JSON.stringify(["dist/index.js", "dist/updater.mjs"]),
+          JSON.stringify(["dist/index.js", "dist/updater.mjs", localOverrideWorkerPackagePath]),
         );
       }
       await run(

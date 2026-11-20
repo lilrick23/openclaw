@@ -1,7 +1,7 @@
 import { expect, it } from "vitest";
+import { sourceConfigSnapshot } from "../lib/config/config-snapshot.test-support.ts";
 import { installMockGateway } from "../test-helpers/control-ui-e2e.ts";
 import { createControlUiE2eSuite } from "./control-ui-e2e-suite.test-support.ts";
-import { configSnapshot } from "./model-setup-fixtures.test-support.ts";
 
 const suite = createControlUiE2eSuite({ name: "Models settings layout and discovery" });
 
@@ -33,7 +33,7 @@ const gatewayScenario = {
         { id: "work", name: "Work" },
       ],
     },
-    "config.get": configSnapshot(config, "models-layout"),
+    "config.get": sourceConfigSnapshot(config, "models-layout"),
     "models.list": catalog,
     "models.authStatus": {
       ts: Date.now(),
@@ -85,7 +85,7 @@ suite.define(() => {
                 };
               }),
             );
-          expect(rows.every((row) => (width > 768 ? row.sideBySide : row.stacked))).toBe(true);
+          expect(rows.every((row) => (width > 640 ? row.sideBySide : row.stacked))).toBe(true);
           await page
             .locator(".settings-sidebar openclaw-agent-select")
             .waitFor({ state: "attached" });
@@ -118,13 +118,20 @@ suite.define(() => {
           await page.locator('.model-providers__defaults [role="listbox"]').first().waitFor();
           await gateway.setMethodResponse("models.list", {
             ...catalog,
+            models: [
+              ...models,
+              { id: "published", name: "Published model", provider: "openai", available: true },
+            ],
             pendingProviders: ["openai"],
           });
           await gateway.emitGatewayEvent("chat.metadata.changed", {});
+          await page
+            .locator('.model-providers__defaults [role="option"][data-value="openai/published"]')
+            .first()
+            .waitFor();
           const progress = page.locator('.model-providers__catalog-progress[role="status"]');
-          await progress.waitFor();
+          expect(await progress.count()).toBe(0);
           expect(await primary.boundingBox()).toEqual(beforeDiscovery);
-          expect(await progress.locator('[aria-hidden="true"]').count()).toBe(1);
           await page.keyboard.press("Escape");
         },
       );

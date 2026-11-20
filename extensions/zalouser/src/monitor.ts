@@ -4,10 +4,12 @@ import {
   createAcceptedChannelDeliveryResult,
   createChannelInboundEnvelopeBuilderAsync,
   createChannelPartialDeliveryError,
+  formatInboundMediaUnavailableText,
   implicitMentionKindWhen,
   isChannelPartialDeliveryError,
   logInboundDrop,
   resolveInboundMentionDecision,
+  type InboundMediaFacts,
 } from "openclaw/plugin-sdk/channel-inbound";
 import type { ChannelIngressContextBinding } from "openclaw/plugin-sdk/channel-ingress-runtime";
 import { createChannelPairingController } from "openclaw/plugin-sdk/channel-pairing";
@@ -18,6 +20,7 @@ import { expectDefined } from "openclaw/plugin-sdk/expect-runtime";
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import { channelReadyPatch } from "openclaw/plugin-sdk/gateway-runtime";
 import { resolvePromptHistoryLimit } from "openclaw/plugin-sdk/number-runtime";
+import { resolveOutboundMediaAccessForConfig } from "openclaw/plugin-sdk/outbound-media";
 import { type HistoryEntry, createChannelHistoryWindow } from "openclaw/plugin-sdk/reply-history";
 import {
   deliverTextOrMediaReply,
@@ -66,10 +69,6 @@ type ZalouserMonitorOptions = {
   ingressQueue?: Parameters<typeof createZalouserIngressMonitor>[0]["queue"];
 };
 
-type ZalouserMonitorResult = {
-  stop: () => Promise<void>;
-};
-
 const ZALOUSER_TEXT_LIMIT = 2000;
 
 type ZalouserCoreRuntime = ReturnType<typeof getZalouserRuntime>;
@@ -88,9 +87,7 @@ function logVerbose(core: ZalouserCoreRuntime, runtime: RuntimeEnv, message: str
   }
 }
 
-export async function monitorZalouserProvider(
-  options: ZalouserMonitorOptions,
-): Promise<ZalouserMonitorResult> {
+export async function monitorZalouserProvider(options: ZalouserMonitorOptions) {
   const { config } = options;
   let { account } = options;
   const { abortSignal, statusSink, runtime } = options;
@@ -427,12 +424,13 @@ export async function monitorZalouserProvider(
         cliMsgId: message.cliMsgId,
         fallback: `${message.timestampMs}`,
       });
-      accessDecision = await resolveAccessDecision({
+      const routeContextBinding: ChannelIngressContextBinding = {
         agentId: route.agentId,
         sessionKey: route.sessionKey,
         messageId: messageSid,
         inboundEventKind: "user_request",
-      });
+      };
+      accessDecision = await resolveAccessDecision(routeContextBinding);
       if (!accessDecision.senderAccess.allowed) {
         logVerbose(
           core,
@@ -569,6 +567,81 @@ export async function monitorZalouserProvider(
         cliMsgId: message.cliMsgId,
       });
 
+      let bodyForAgent = rawBody;
+      let media: InboundMediaFacts[] | undefined;
+      const attachment = message.attachment;
+      if (attachment) {
+        const signal = turnAdoptionLifecycle
+          ? AbortSignal.any([abortSignal, turnAdoptionLifecycle.abortSignal])
+          : abortSignal;
+        accessDecision = await resolveAccessDecision(routeContextBinding);
+        signal.throwIfAborted();
+        if (
+          !accessDecision.senderAccess.allowed ||
+          (isGroup && hasControlCommand && !accessDecision.commandAccess.authorized)
+        ) {
+          return;
+        }
+        let saved: Awaited<ReturnType<typeof core.channel.media.saveRemoteMedia>> | undefined;
+        try {
+          saved = await core.channel.media.saveRemoteMedia({
+            url: attachment.url,
+            maxBytes: account.mediaMaxBytes,
+            requireHttps: true,
+            // Attachment payloads may name only Zalo CDN hosts, including redirects.
+            ssrfPolicy: {
+              hostnameAllowlist: ["*.zdn.vn", "*.dlfl.vn", "*.flchat.vn", "*.dlmd.me"],
+            },
+            responseHeaderTimeoutMs: 30_000,
+            readIdleTimeoutMs: 30_000,
+            timeoutMs: 120_000,
+            requestInit: { signal },
+            assertCurrent: () => signal.throwIfAborted(),
+            originalFilename: attachment.fileName,
+            filePathHint: attachment.fileName,
+          });
+        } catch {
+          signal.throwIfAborted();
+          runtime.error?.(`[${account.accountId}] Failed to download Zalo ${attachment.kind}`);
+          bodyForAgent = formatInboundMediaUnavailableText({
+            body: rawBody,
+            notice: `[zalouser ${attachment.kind} attachment unavailable]`,
+          });
+        }
+        try {
+          // Downloads can outlive pairing access or the owning ingress claim.
+          accessDecision = await resolveAccessDecision(routeContextBinding);
+          signal.throwIfAborted();
+          commandAuthorized = accessDecision.commandAccess.requested
+            ? accessDecision.commandAccess.authorized
+            : undefined;
+          if (
+            !accessDecision.senderAccess.allowed ||
+            (isGroup && hasControlCommand && commandAuthorized !== true)
+          ) {
+            return;
+          }
+          if (saved) {
+            media = [
+              {
+                path: saved.path,
+                url: saved.path,
+                contentType: saved.contentType,
+                fileName: attachment.fileName ?? saved.fileName,
+                sizeBytes: saved.size,
+                kind: attachment.kind,
+              },
+            ];
+          }
+        } finally {
+          if (saved && !media) {
+            await core.channel.media.deleteMediaBuffer(saved.id).catch(() => {
+              runtime.error?.(`[${account.accountId}] Failed to discard rejected Zalo attachment`);
+            });
+          }
+        }
+      }
+
       const ctxPayload = core.channel.inbound.buildContext({
         channelIngress: accessDecision,
         channel: "zalouser",
@@ -599,11 +672,12 @@ export async function monitorZalouserProvider(
         },
         message: {
           body: combinedBody,
-          bodyForAgent: rawBody,
+          bodyForAgent,
           rawBody,
           commandBody,
           inboundHistory,
         },
+        media,
         extra: {
           BodyForCommands: commandBody,
           GroupSubject: isGroup ? groupName || undefined : undefined,
@@ -684,7 +758,9 @@ export async function monitorZalouserProvider(
               await sendMessageZalouser(chatId, text, {
                 profile,
                 mediaMaxBytes,
-                ...(mediaUrl ? { mediaUrl } : {}),
+                ...(mediaUrl
+                  ? { mediaUrl, mediaAccess: resolveOutboundMediaAccessForConfig(config) }
+                  : {}),
                 isGroup,
                 textMode: "markdown",
                 textChunkMode: chunkMode,

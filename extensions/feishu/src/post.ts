@@ -75,7 +75,9 @@ function renderLinkElement(element: Record<string, unknown>): string {
   if (!href) {
     return escapeMarkdownText(text);
   }
-  return `[${escapeMarkdownText(text)}](${href})`;
+  return `[${escapeMarkdownText(text)}](${href.replace(/[\\()<>\s]/gu, (character) =>
+    character === "(" || character === ")" ? `\\${character}` : encodeURIComponent(character),
+  )})`;
 }
 
 function renderMentionElement(element: Record<string, unknown>): string {
@@ -291,7 +293,7 @@ export function renderPostContent(
 
     const title = escapeMarkdownText(payload.title.trim());
     const body = paragraphs.join("\n").trim();
-    const textContent = [title, body].filter(Boolean).join("\n\n").trim();
+    const textContent = [title, body].filter(Boolean).join("\n\n");
 
     return {
       textContent: textContent || (options.emptyTextFallback ?? FALLBACK_POST_TEXT),

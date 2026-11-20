@@ -1,8 +1,10 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { selectBackgroundSource } from "../../../packages/gateway-protocol/src/schema/background-preferences.ts";
+import { DEFAULT_SIDEBAR_ENTRIES } from "../app-navigation.ts";
 import { openSlot } from "../pages/chat/sidebar-layout.ts";
 import { createImportedCustomThemeFixture } from "../test-helpers/custom-theme.ts";
+import { createMediaQueryList } from "../test-helpers/media-query.ts";
 import {
   expectedGatewayUrl,
   installSettingsStorageLifecycle,
@@ -12,6 +14,7 @@ import {
 } from "../test-helpers/settings-node.ts";
 import { createApplicationTheme } from "./bootstrap-theme.ts";
 import { createGatewayStoreTestStore } from "./gateway-store.test-support.ts";
+import { isNativeMobileHost, setNativeControlHost } from "./native-web-chrome.ts";
 import { applyServerUiPrefs, resolveServerUiPrefState } from "./server-prefs-reconcile.ts";
 import { resetServerUiPrefsSync } from "./server-prefs.ts";
 import { backgroundPreferenceStorageKey, saveBackgroundPreference } from "./settings-background.ts";
@@ -41,8 +44,30 @@ describe("resolveApplicationStartupSettings", () => {
   });
 
   afterEach(() => {
+    setNativeControlHost(false);
     vi.unstubAllGlobals();
   });
+
+  it.each(["injected", "message-port"])(
+    "retains native presentation provenance after %s startup",
+    (transport) => {
+      vi.stubGlobal("navigator", { userAgent: "Android", platform: "Linux armv8l" });
+      const gatewayUrl = "wss://gateway.example";
+      if (transport === "injected") {
+        window["__OPENCLAW_NATIVE_CONTROL_AUTH__"] = { gatewayUrl, token: "synthetic-token" };
+      }
+      resolveApplicationStartupSettings(makeUiSettings(gatewayUrl), {
+        pathname: "/chat",
+        search: "",
+        hash:
+          transport === "message-port"
+            ? `#nativeControlAuth=${encodeURIComponent(gatewayUrl)}`
+            : "",
+      });
+      expect(window["__OPENCLAW_NATIVE_CONTROL_AUTH__"]).toBeUndefined();
+      expect(isNativeMobileHost()).toBe(true);
+    },
+  );
 
   it("clears a cached shared token when the native dashboard selects browser identity", () => {
     const gatewayUrl = "wss://gateway.example";
@@ -129,30 +154,11 @@ describe("resolveApplicationStartupSettings", () => {
 describe("gateway settings and layout persistence", () => {
   installSettingsStorageLifecycle();
 
-  it("retains Details process dismissals in the existing Gateway settings across other writes", () => {
-    const first = "wss://process-a.example";
-    const second = "wss://process-b.example";
-    const dismissals = { '["viewer","main","agent:main:review"]': ["process-1"] };
-    patchSettings({ gatewayUrl: first, detailsDismissedProcesses: dismissals });
-    patchSettings({ gatewayUrl: second, themeMode: "light" });
-    expect(loadSettings(second).detailsDismissedProcesses).toBeUndefined();
-    expect(loadSettings(first).detailsDismissedProcesses).toEqual(dismissals);
-    patchSettings({ gatewayUrl: first, navWidth: 300 });
-    expect(loadSettings(first).detailsDismissedProcesses).toEqual(dismissals);
-  });
-
   beforeEach(() => {
     setTestLocation({ protocol: "https:", host: "gateway.example:8443", pathname: "/" });
-    vi.stubGlobal("matchMedia", (media: string): MediaQueryList => ({
-      media,
-      matches: false,
-      onchange: null,
-      addListener() {},
-      removeListener() {},
-      addEventListener() {},
-      removeEventListener() {},
-      dispatchEvent: () => true,
-    }));
+    vi.stubGlobal("matchMedia", (media: string): MediaQueryList =>
+      createMediaQueryList(media, false),
+    );
   });
 
   it("keeps development credentials scoped to the upstream when the Vite target changes", () => {
@@ -343,14 +349,14 @@ describe("gateway settings and layout persistence", () => {
     expect(loadSettings().navWidth).toBe(258);
     expect(readStored()).not.toHaveProperty("navCollapsed");
 
-    // Corrupt the persisted list; load falls back to the empty rail.
+    // Corrupt the persisted list; load falls back to the default rail.
     writeStored({
       ...readStored(),
       railShortcuts: "route:tasks",
       navWidth: 220,
       navCollapsed: true,
     });
-    expect(loadSettings().sidebarEntries).toEqual([]);
+    expect(loadSettings().sidebarEntries).toEqual(DEFAULT_SIDEBAR_ENTRIES);
     expect(loadSettings().navWidth).toBe(258);
     expect(loadSettings().navCollapsed).toBe(false);
   });
@@ -384,13 +390,13 @@ describe("gateway settings and layout persistence", () => {
         themeMode: "dark",
         navWidth: 300,
       });
-      expect(settings.sidebarEntries).toEqual([]);
+      expect(settings.sidebarEntries).toEqual(DEFAULT_SIDEBAR_ENTRIES);
       saveSettings(settings);
       expect(readStored().sessionsByGateway).toEqual(sessionsByGateway);
       expect(readStored()).toMatchObject({
         sidebarEntries,
         sidebarPinnedRoutes,
-        railShortcuts: [],
+        railShortcuts: DEFAULT_SIDEBAR_ENTRIES,
       });
       expect(loadSettings()).toEqual(settings);
     },

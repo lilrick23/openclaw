@@ -13,6 +13,7 @@ import { defaultRuntime, type RuntimeEnv } from "../runtime.js";
 import { openRootFileSync, readFileDescriptorBoundedSync } from "./boundary-file-read.js";
 import { FsSafeError } from "./fs-safe.js";
 import { resolveOpenClawPackageRoot, resolveOpenClawPackageRootSync } from "./openclaw-root.js";
+import { resolveExternalPackageRuntimeEntrypointUrl } from "./runtime-process-url.js";
 
 export function formatControlUiSourceCommand(root: string, action: "build" | "dev"): string {
   const directory = process.platform === "win32" ? quotePowerShellArg(root) : quoteCliArg(root);
@@ -339,7 +340,9 @@ export async function ensureControlUiAssetsBuilt(
     );
   }
 
-  const uiScript = path.join(repoRoot, "scripts", "ui.js");
+  const uiScript = fileURLToPath(
+    resolveExternalPackageRuntimeEntrypointUrl("sourceUiBuild", repoRoot),
+  );
   if (!fs.existsSync(uiScript)) {
     return controlUiAssetsFailure(`Control UI assets missing but ${uiScript} is unavailable.`);
   }
@@ -364,6 +367,9 @@ export async function ensureControlUiAssetsBuilt(
     build = await runCommandWithTimeout([process.execPath, uiScript, "build"], {
       cwd: repoRoot,
       timeoutMs: CONTROL_UI_ASSETS_BUILD_TIMEOUT_MS,
+      // The source builder owns compiler cancellation (5s grace + 5s drain).
+      // Let that owner settle its artifact claim before escalating its process.
+      killGraceMs: 15_000,
       ...(opts.signal ? { signal: opts.signal } : {}),
     });
   } catch (error) {

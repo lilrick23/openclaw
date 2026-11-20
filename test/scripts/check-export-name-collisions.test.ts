@@ -46,6 +46,15 @@ it("ignores types, pure re-exports, imports exported locally, and renamed export
 
 it.each([
   [
+    "createNativeWorkerResource",
+    "otherBehavior",
+    "src/unrelated/extra.ts",
+    [
+      "src/infra/sqlite-readonly-native-resource.ts",
+      "src/plugins/plugin-capture-native-resource.ts",
+    ],
+  ],
+  [
     "loadFreeBsdProcessIdentityNative",
     "otherBehavior",
     "src/extra.ts",
@@ -169,6 +178,19 @@ it.each<{
   {
     files: { "src/a.js": "export const f = 1;", "src/b.mjs": "export const f = 2;" },
     expected: collision("f", "src/a.js", "src/b.mjs"),
+  },
+  {
+    files: {
+      "src/program.generated.mjs": "export function runProgram() {}",
+      "src/program.generated.d.mts": "export declare function runProgram(): void;",
+      "src/plain.js": "export const plainValue = 1;",
+      "src/plain.d.ts": "export declare const plainValue: number;",
+      "src/common.ts": "export function runCommonProgram() {}",
+      "src/common.d.cts": "export declare function runCommonProgram(): void;",
+      "src/a.mts": "export const f = 1;",
+      "src/b.mjs": "export const f = 2;",
+    },
+    expected: collision("f", "src/a.mts", "src/b.mjs"),
   },
   {
     files: {

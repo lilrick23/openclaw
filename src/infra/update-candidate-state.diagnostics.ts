@@ -1,4 +1,4 @@
-import { writeSync } from "node:fs";
+import fs from "node:fs";
 import type { BackupProgressInfo } from "node:sqlite";
 import { StringDecoder } from "node:string_decoder";
 import { z } from "zod";
@@ -10,14 +10,14 @@ import {
 } from "./errors.js";
 import { findUpdateCaptureSpaceError, UpdateCaptureSpaceError } from "./update-capture-space.js";
 import { isPublicUpdateFailureCode } from "./update-failure-public-codes.js";
-
-export const UPDATE_STATE_INSPECTION_PROGRESS_PREFIX = "State schema progress: ";
+import { UPDATE_STATE_INSPECTION_PROGRESS_PREFIX } from "./update-state-inspection-protocol.js";
 const DIAGNOSTIC_TAIL_CHARS = 12_000;
 const CAPTURE_SPACE_PREFIX = "Update capture space: ";
 const CaptureSpaceSchema = z
   .object({
     requiredBytes: z.number().int().nonnegative(),
     availableBytes: z.number().int().nonnegative(),
+    volume: z.enum(["backup", "rollback"]).optional(),
   })
   .refine(({ requiredBytes, availableBytes }) => availableBytes < requiredBytes);
 
@@ -111,7 +111,7 @@ export function createUpdateStateInspectionReporter(legacy = false) {
       line = `${UPDATE_STATE_INSPECTION_PROGRESS_PREFIX}${JSON.stringify({ phase: "schema inspection; detailed progress omitted" })}\n`;
     }
     try {
-      writeSync(2, line);
+      fs.writeSync(2, line);
       emittedBytes += Buffer.byteLength(line);
       exhausted = omitDetails;
     } catch (error) {

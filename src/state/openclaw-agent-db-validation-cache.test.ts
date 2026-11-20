@@ -1,11 +1,18 @@
 import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { assert, describe, expect, it as baseIt, vi } from "vitest";
-import { createDeferred } from "../../test/helpers/promise.js";
+import {
+  awaitGateBeforeSettlement,
+  createDeferred,
+  withinTest,
+} from "../../test/helpers/promise.js";
 import { isPostgresSqlConnection } from "../infra/sql-connection.js";
+import * as nativeAdmission from "../infra/sqlite-database-admission-turn.js";
 import { revokeSqliteDatabaseAdmissionsForPath } from "../infra/sqlite-database-admission.js";
 import { runSqliteReadOperationSync } from "../infra/sqlite-schema-facts.js";
+import { cleanupSessionStateForTest as cleanupState } from "../test-utils/session-state-cleanup.js";
 import {
   AgentDatabaseSchemaAdmissionChangedError as AdmissionChangedError,
   AgentDatabaseSchemaAdmissionInvalidError as AdmissionInvalidError,
@@ -45,7 +52,6 @@ import {
 import {
   closeOpenClawAgentDatabaseByPath as closePath,
   closeOpenClawAgentDatabasesAsync as closeDatabases,
-  closeOpenClawAgentDatabasesForTest as retireFixture,
   openOpenClawAgentDatabase as openDatabase,
   runOpenClawAgentWriteTransaction as writeTransaction,
 } from "./openclaw-agent-db.js";
@@ -53,7 +59,12 @@ import { runOpenClawAgentWriteAdmission as admitWrite } from "./openclaw-agent-w
 import { expectRow, expectRows } from "./openclaw-state-db-fixtures.test-support.js";
 
 const observedValidationDirectories = vi.hoisted(
-  () => [] as Array<{ directory: string; notify: (filename?: string) => void; active: boolean }>,
+  () =>
+    [] as Array<{
+      directory: string;
+      notify: (filename?: string, event?: string) => void;
+      active: boolean;
+    }>,
 );
 type ReceiptRun = Parameters<typeof withReceiptFixture>[1];
 type ReceiptOptions = Parameters<ReceiptRun>[1];
@@ -105,7 +116,7 @@ function liveCell() {
 }
 // mock-isolation: Drive identity invalidation deterministically without native watcher timing.
 vi.mock("../infra/owned-directory-observation.js", () => ({
-  observeOwnedDirectory(directory: string, notify: (filename?: string) => void) {
+  observeOwnedDirectory(directory: string, notify: (filename?: string, event?: string) => void) {
     const observer = { directory, notify, active: true };
     observedValidationDirectories.push(observer);
     return {
@@ -117,10 +128,42 @@ vi.mock("../infra/owned-directory-observation.js", () => ({
 }));
 
 describe("canonical proof on physical database validation", () => {
+  it.for(["first capture", "reader admission", "observation", "unadmitted locator"] as const)(
+    "keeps %s filesystem checks off the calling thread",
+    async (phase, { empty: { database } }) => {
+      if (phase !== "first capture") {
+        await captureReadValidation(database);
+      }
+      const stat = vi.spyOn(fs, "statSync");
+      const realpath = vi.spyOn(fs.realpathSync, "native");
+      syncBuiltinESMExports();
+      try {
+        if (phase === "unadmitted locator") {
+          expect(
+            await captureReadValidation({ ...database, path: `${database.path}.missing` }),
+          ).toBeUndefined();
+        } else if (phase === "observation") {
+          for (const observer of activeObservers(database.path)) {
+            observer.notify(path.basename(database.path), "rename");
+          }
+          await captureReadValidation(database, "admission");
+        } else {
+          expect(await captureReadValidation(database, "admission")).toBeDefined();
+        }
+        expect(stat).not.toHaveBeenCalled();
+        expect(realpath).not.toHaveBeenCalled();
+      } finally {
+        stat.mockRestore();
+        realpath.mockRestore();
+        syncBuiltinESMExports();
+      }
+    },
+  );
+
   it.for(["ordinary close", "fixture retirement"] as const)(
     "handles a removed fixture's queued observation after %s",
-    async (cleanup, { empty: { database } }) => {
-      const captured = captureReadValidation(database)!;
+    async (cleanup, { empty: { database, options } }) => {
+      const captured = (await captureReadValidation(database))!;
       const successor = independentWorkerReceipt(database);
       const root = path.dirname(database.path);
       const observer = observedValidationDirectories.findLast(
@@ -132,7 +175,7 @@ describe("canonical proof on physical database validation", () => {
       expect(observer!.active).toBe(true);
       expectFlag(captured.validation.valid, 1);
       if (cleanup === "fixture retirement") {
-        retireFixture(root);
+        await cleanupState({ rootPath: root, stateDir: options.env!.OPENCLAW_STATE_DIR });
         expect(observer!.active).toBe(false);
         expect(getTransfer(database)).toBeUndefined();
       }
@@ -149,29 +192,98 @@ describe("canonical proof on physical database validation", () => {
 
       // Deliver even after close: a queued callback must not find retired path trust.
       observer!.notify(path.basename(database.path));
-      expectFlag(successor.valid, cleanup === "fixture retirement" ? 1 : 0);
+      await vi.waitFor(() => expectFlag(successor.valid, cleanup === "fixture retirement" ? 1 : 0));
     },
   );
 
+  it("awaits first observation before sharing a receipt with a concurrent reader", async ({
+    empty: { database },
+  }) => {
+    const resume = createDeferred();
+    const stat = vi.spyOn(fs.promises, "stat").mockImplementationOnce(async () => {
+      await resume.promise;
+      throw new Error("Captured file disappeared during admission");
+    });
+    syncBuiltinESMExports();
+    const first = captureReadValidation(database);
+    let settled = false;
+    const second = Promise.resolve(captureReadValidation(database)).then((value) => {
+      settled = true;
+      return value;
+    });
+    try {
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      resume.resolve();
+      expect(await first).toBeUndefined();
+      expect(await second).toBeUndefined();
+    } finally {
+      resume.resolve();
+      await Promise.allSettled([first, second]);
+      stat.mockRestore();
+      syncBuiltinESMExports();
+    }
+  });
+
+  it("does not revoke a successor receipt when a retired observation finishes", async ({
+    empty: { database },
+  }) => {
+    await captureReadValidation(database);
+    const resume = createDeferred();
+    const stat = vi.spyOn(fs.promises, "stat").mockImplementationOnce(async () => {
+      await resume.promise;
+      throw new Error("The previously observed path was unavailable");
+    });
+    syncBuiltinESMExports();
+    activeObservers(database.path)[0]!.notify(path.basename(database.path), "rename");
+    try {
+      invalidateValidation(database.path);
+      const successor = setValidation(database);
+      resume.resolve();
+      const admitted = await captureReadValidation(database);
+      expect(admitted?.validation.receiptId).toBe(successor.receiptId);
+      expectFlag(successor.valid, 1);
+      expect(getTransfer(database)).toBe(successor);
+    } finally {
+      resume.resolve();
+      stat.mockRestore();
+      syncBuiltinESMExports();
+    }
+  });
+
   it.for(["observation", "reader admission"] as const)(
     "retains read validation across native close and detects replacement through %s",
-    (invalidation, { empty: { database } }) => {
-      const captured = captureReadValidation(database);
+    async (invalidation, { empty: { database } }) => {
+      const captured = await captureReadValidation(database);
       expect(captured?.canonicalPath).toBe(database.path);
       captured!.assertCurrent();
       closePath(database.path);
       expect(activeObservers(database.path)).not.toHaveLength(0);
+      if (invalidation === "observation") {
+        const stat = vi.spyOn(fs, "statSync");
+        syncBuiltinESMExports();
+        try {
+          for (const observer of activeObservers(database.path)) {
+            observer.notify(path.basename(database.path), "change");
+          }
+          expect(stat).not.toHaveBeenCalled();
+        } finally {
+          stat.mockRestore();
+          syncBuiltinESMExports();
+        }
+      }
       replaceFile(database.path);
       expectFlag(captured!.validation.valid, 1);
-      expect(captureReadValidation(database)?.validation.receiptId).toBe(
+      expect((await captureReadValidation(database))?.validation.receiptId).toBe(
         captured?.validation.receiptId,
       );
       if (invalidation === "reader admission") {
-        expect(captureReadValidation(database, "admission")).toBeUndefined();
+        expect(await captureReadValidation(database, "admission")).toBeUndefined();
       } else {
         for (const observer of activeObservers(database.path)) {
-          observer.notify(path.basename(database.path));
+          observer.notify(path.basename(database.path), "rename");
         }
+        await vi.waitFor(() => expectFlag(captured!.validation.valid, 0));
       }
       expect(() => captured!.assertCurrent()).toThrow(
         "Session reader validation is no longer current",
@@ -183,8 +295,9 @@ describe("canonical proof on physical database validation", () => {
 
   it("rejects a replaced file at receiver and queued write admission before observation", async ({
     empty: { database, options },
+    signal,
   }) => {
-    const captured = captureReadValidation(database)!;
+    const captured = (await captureReadValidation(database))!;
     closePath(database.path);
     const entered = createDeferred();
     const resume = createDeferred();
@@ -193,12 +306,32 @@ describe("canonical proof on physical database validation", () => {
       await resume.promise;
     });
     await entered.promise;
+    const writerCaptured = createDeferred();
+    const nativeTurn = nativeAdmission.runWithSqliteDatabaseAdmissionTurn;
+    const observeTurn = vi
+      .spyOn(nativeAdmission, "runWithSqliteDatabaseAdmissionTurn")
+      .mockImplementation((...args) => {
+        const pending = nativeTurn(...args);
+        if (args[0].includes(database.path)) {
+          writerCaptured.resolve();
+        }
+        return pending;
+      });
     let effect = false;
     const queued = admitWrite(options, () => {
       effect = true;
     });
     void queued.catch(() => undefined);
     try {
+      // Discovery is async; replace only after the queued writer captures its original source.
+      await withinTest(
+        awaitGateBeforeSettlement(
+          writerCaptured.promise,
+          queued,
+          "Writer did not capture admission",
+        ),
+        signal,
+      );
       replaceFile(database.path);
       {
         using opened = openTestReader(options);
@@ -206,14 +339,17 @@ describe("canonical proof on physical database validation", () => {
       }
       resume.resolve();
       await first;
-      await expect(queued).rejects.toThrow("Agent database target changed before write admission");
+      await expect(queued).rejects.toThrow(
+        /^(?:Agent database target changed before write admission|SQLite database pathname changed during admission)$/u,
+      );
       expect(effect).toBe(false);
     } finally {
       resume.resolve();
       await Promise.allSettled([first, queued]);
+      observeTurn.mockRestore();
     }
   });
-  it("shares republished schema proof with restart readers through a directory symlink", ({
+  it("shares republished schema proof with restart readers through a directory symlink", async ({
     populated: { database },
   }) => {
     const aliasDir = path.join(path.dirname(database.path), "reader-alias");
@@ -222,7 +358,7 @@ describe("canonical proof on physical database validation", () => {
       agentId: database.agentId,
       path: path.join(aliasDir, path.basename(database.path)),
     };
-    const reader = captureReadValidation(alias);
+    const reader = await captureReadValidation(alias);
     expect(reader).toBeDefined();
     const receipt = getValidation(database)!;
     const delayed = structuredClone(receipt);
@@ -338,8 +474,9 @@ describe("canonical proof on physical database validation", () => {
 
   it.for(["exact", "sibling-family"] as const)(
     "releases closed reader metadata by %s without revoking parent proof or unselected aliases",
-    (selection, { empty: { database } }) => {
+    async (selection, { empty: { database } }) => {
       const receipt = getValidation(database)!;
+      const reader = (await captureReadValidation(database))!;
       const source = path.parse(database.path);
       const family = path.join(source.dir, `${source.name}.secondary${source.ext}`);
       const sibling = path.join(source.dir, `${source.name}-other${source.ext}`);
@@ -361,6 +498,16 @@ describe("canonical proof on physical database validation", () => {
       releaseReadValidation(candidates, [database.path]);
       expect(getTransfer(database)?.valid).toBe(receipt.valid);
       releaseReadValidation(candidates);
+
+      const realpath = vi.spyOn(fs.realpathSync, "native");
+      try {
+        expect(() => reader.assertCurrent()).toThrow(
+          "Session reader validation is no longer current",
+        );
+        expect(realpath).not.toHaveBeenCalled();
+      } finally {
+        realpath.mockRestore();
+      }
 
       expect(getTransfer(database)).toBeUndefined();
       if (selection === "sibling-family") {
@@ -384,6 +531,29 @@ describe("canonical proof on physical database validation", () => {
   );
 
   describe("native integrity proof handoff", () => {
+    it.for(["empty", "canonical"] as const)(
+      "keeps concurrent publications current after $0 admission succeeds",
+      (cache, { empty: { database, options } }) => {
+        if (cache === "canonical") {
+          writeTransaction(recordCanonical, options);
+        }
+        const received = independentWorkerReceipt(database);
+        clearValidation(database.path);
+        if (cache === "canonical") {
+          expect(hasCanonical(database)).toBe(true);
+        }
+        const first = capturePublication(database);
+        const second = capturePublication(database);
+
+        first(received.identity, structuredClone(received));
+        // A later opener must not replace the owner captured by the queued peer.
+        const third = capturePublication(database);
+        expect(() => second(received.identity, structuredClone(received))).not.toThrow();
+        expect(() => third(received.identity, structuredClone(received))).not.toThrow();
+        expect(getTransfer(database)?.schema).toBeDefined();
+      },
+    );
+
     it("distinguishes raced publication from malformed receipts even after revocation", ({
       empty: { database },
     }) => {

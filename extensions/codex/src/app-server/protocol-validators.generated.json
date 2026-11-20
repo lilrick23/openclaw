@@ -21,7 +21,19 @@
               "properties": {
                 "email": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
                 "planType": { "$ref": "#/definitions/PlanType" },
-                "type": { "enum": ["chatgpt"], "title": "ChatgptAccountType", "type": "string" }
+                "type": { "enum": ["chatgpt"], "title": "ChatgptAccountType", "type": "string" },
+                "workspaceName": {
+                  "anyOf": [
+                    {
+                      "description": "Display name of the selected ChatGPT workspace, when available.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Display name of the selected ChatGPT workspace, when available.",
+                      "type": "null"
+                    }
+                  ]
+                }
               },
               "required": ["email", "planType", "type"],
               "title": "ChatgptAccount",
@@ -38,6 +50,15 @@
               },
               "required": ["type"],
               "title": "AmazonBedrockAccount",
+              "type": "object"
+            },
+            {
+              "description": "Google Cloud Vertex AI with externally managed credentials.",
+              "properties": {
+                "type": { "enum": ["gcp"], "title": "GcpAccountType", "type": "string" }
+              },
+              "required": ["type"],
+              "title": "GcpAccount",
               "type": "object"
             }
           ]
@@ -72,6 +93,30 @@
           "type": "object"
         },
         "AgentMessageDelivery": { "enum": ["async"], "type": "string" },
+        "AgentMessageDisplay": {
+          "description": "A presentation instruction for Chat to apply to this answer when recovering history.",
+          "properties": {
+            "action": {
+              "description": "Unknown actions must be left for the producing client to handle.",
+              "type": "string"
+            },
+            "blockType": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+            "checkTrustedContacts": { "anyOf": [{ "type": "boolean" }, { "type": "null" }] },
+            "cyberTrustedAccess": { "anyOf": [{ "type": "boolean" }, { "type": "null" }] }
+          },
+          "required": ["action"],
+          "type": "object"
+        },
+        "AgentMessageModeration": {
+          "properties": {
+            "display": {
+              "anyOf": [{ "$ref": "#/definitions/AgentMessageDisplay" }, { "type": "null" }]
+            },
+            "moderated": { "type": "boolean" }
+          },
+          "required": ["moderated"],
+          "type": "object"
+        },
         "AgentPath": { "type": "string" },
         "ApprovalsReviewer": {
           "description": "Configures who approval requests are routed to for review. Examples include sandbox escapes, blocked network access, MCP approval prompts, and ARC escalations. Defaults to `user`. `auto_review` uses a carefully prompted subagent to gather relevant context and apply a risk-based decision framework before approving or denying the request. The legacy value `guardian_subagent` is accepted for compatibility.",
@@ -125,8 +170,7 @@
           "type": "object"
         },
         "CodexErrorInfo": {
-          "description": "This translation layer make sure that we expose codex error code in camel case.\n\nWhen an upstream HTTP status is available (for example, from the Responses API or a provider), it is forwarded in `httpStatusCode` on the relevant `codexErrorInfo` variant.",
-          "oneOf": [
+          "anyOf": [
             {
               "additionalProperties": false,
               "properties": {
@@ -228,6 +272,8 @@
                 "rateLimitExceeded",
                 "flexUnavailable",
                 "serverOverloaded",
+                "modelNotFound",
+                "policyCapacityUnavailable",
                 "cyberPolicy",
                 "misalignmentPolicyViolation",
                 "tooManyDenials",
@@ -239,6 +285,135 @@
                 "other"
               ],
               "type": "string"
+            },
+            {
+              "description": "The workspace's inference hook explicitly denied this request.",
+              "enum": ["inferenceHookDenied"],
+              "type": "string"
+            },
+            { "anyOf": [{ "type": "string" }, { "type": "object" }] }
+          ],
+          "description": "This translation layer make sure that we expose codex error code in camel case.\n\nWhen an upstream HTTP status is available (for example, from the Responses API or a provider), it is forwarded in `httpStatusCode` on the relevant `codexErrorInfo` variant.",
+          "allOf": [
+            {
+              "anyOf": [
+                { "not": { "type": "object", "required": ["httpConnectionFailed"] } },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "httpConnectionFailed": {
+                      "properties": {
+                        "httpStatusCode": {
+                          "anyOf": [
+                            { "format": "uint16", "minimum": 0, "type": "integer" },
+                            { "format": "uint16", "minimum": 0, "type": "null" }
+                          ]
+                        }
+                      },
+                      "type": "object"
+                    }
+                  },
+                  "required": ["httpConnectionFailed"],
+                  "title": "HttpConnectionFailedCodexErrorInfo",
+                  "type": "object"
+                }
+              ]
+            },
+            {
+              "anyOf": [
+                { "not": { "type": "object", "required": ["responseStreamConnectionFailed"] } },
+                {
+                  "additionalProperties": false,
+                  "description": "Failed to connect to the response SSE stream.",
+                  "properties": {
+                    "responseStreamConnectionFailed": {
+                      "properties": {
+                        "httpStatusCode": {
+                          "anyOf": [
+                            { "format": "uint16", "minimum": 0, "type": "integer" },
+                            { "format": "uint16", "minimum": 0, "type": "null" }
+                          ]
+                        }
+                      },
+                      "type": "object"
+                    }
+                  },
+                  "required": ["responseStreamConnectionFailed"],
+                  "title": "ResponseStreamConnectionFailedCodexErrorInfo",
+                  "type": "object"
+                }
+              ]
+            },
+            {
+              "anyOf": [
+                { "not": { "type": "object", "required": ["responseStreamDisconnected"] } },
+                {
+                  "additionalProperties": false,
+                  "description": "The response SSE stream disconnected in the middle of a turn before completion.",
+                  "properties": {
+                    "responseStreamDisconnected": {
+                      "properties": {
+                        "httpStatusCode": {
+                          "anyOf": [
+                            { "format": "uint16", "minimum": 0, "type": "integer" },
+                            { "format": "uint16", "minimum": 0, "type": "null" }
+                          ]
+                        }
+                      },
+                      "type": "object"
+                    }
+                  },
+                  "required": ["responseStreamDisconnected"],
+                  "title": "ResponseStreamDisconnectedCodexErrorInfo",
+                  "type": "object"
+                }
+              ]
+            },
+            {
+              "anyOf": [
+                { "not": { "type": "object", "required": ["responseTooManyFailedAttempts"] } },
+                {
+                  "additionalProperties": false,
+                  "description": "Reached the retry limit for responses.",
+                  "properties": {
+                    "responseTooManyFailedAttempts": {
+                      "properties": {
+                        "httpStatusCode": {
+                          "anyOf": [
+                            { "format": "uint16", "minimum": 0, "type": "integer" },
+                            { "format": "uint16", "minimum": 0, "type": "null" }
+                          ]
+                        }
+                      },
+                      "type": "object"
+                    }
+                  },
+                  "required": ["responseTooManyFailedAttempts"],
+                  "title": "ResponseTooManyFailedAttemptsCodexErrorInfo",
+                  "type": "object"
+                }
+              ]
+            },
+            {
+              "anyOf": [
+                { "not": { "type": "object", "required": ["activeTurnNotSteerable"] } },
+                {
+                  "additionalProperties": false,
+                  "description": "Returned when `turn/start` or `turn/steer` is submitted while the current active turn cannot accept same-turn steering, for example `/review` or manual `/compact`.",
+                  "properties": {
+                    "activeTurnNotSteerable": {
+                      "properties": {
+                        "turnKind": { "$ref": "#/definitions/NonSteerableTurnKind" }
+                      },
+                      "required": ["turnKind"],
+                      "type": "object"
+                    }
+                  },
+                  "required": ["activeTurnNotSteerable"],
+                  "title": "ActiveTurnNotSteerableCodexErrorInfo",
+                  "type": "object"
+                }
+              ]
             }
           ]
         },
@@ -351,7 +526,7 @@
           "type": "string"
         },
         "CyberAccessProgram": {
-          "description": "Requested cyber treatment for a ChatGPT-authenticated Codex turn. Authorization and model-tier restrictions remain server-owned.",
+          "description": "Requested cyber treatment for an OpenAI model turn. Authorization and model-tier restrictions remain server-owned.",
           "enum": ["standard", "daybreakBlue", "daybreakRed"],
           "type": "string"
         },
@@ -463,15 +638,29 @@
               "type": "object"
             },
             {
+              "anyOf": [
+                {
+                  "properties": { "audio_url": { "type": "string" } },
+                  "required": ["audio_url"],
+                  "title": "AudioUrlFunctionCallOutputContentItem",
+                  "type": "object"
+                },
+                {
+                  "properties": { "file_id": { "type": "string" } },
+                  "required": ["file_id"],
+                  "title": "FileIdFunctionCallOutputContentItem",
+                  "type": "object"
+                }
+              ],
+              "description": "Inline audio data or an uploaded file loaded by the Responses API.",
               "properties": {
-                "audio_url": { "type": "string" },
                 "type": {
                   "enum": ["input_audio"],
                   "title": "InputAudioFunctionCallOutputContentItemType",
                   "type": "string"
                 }
               },
-              "required": ["audio_url", "type"],
+              "required": ["type"],
               "title": "InputAudioFunctionCallOutputContentItem",
               "type": "object"
             },
@@ -526,6 +715,18 @@
               "type": "object"
             }
           ]
+        },
+        "ImageGenerationInputImage": {
+          "description": "A local image file successfully read for this exact image-generation request.",
+          "properties": {
+            "path": { "$ref": "#/definitions/AbsolutePathBuf" },
+            "sha256": {
+              "description": "Lowercase SHA-256 of the file bytes read before image normalization.",
+              "type": "string"
+            }
+          },
+          "required": ["path", "sha256"],
+          "type": "object"
         },
         "InputModality": {
           "description": "Canonical user-input modality tags advertised by a model.",
@@ -606,7 +807,7 @@
           "type": "object"
         },
         "MessagePhase": {
-          "description": "Classifies an assistant message as interim commentary or final answer text.\n\nProviders do not emit this consistently, so callers must treat `None` as \"phase unknown\" and keep compatibility behavior for legacy models.",
+          "description": "Classifies assistant text as commentary, a partial answer, or a terminal answer.\n\nProviders do not emit this consistently, so callers must treat `None` as \"phase unknown\" and keep compatibility behavior for legacy models.",
           "oneOf": [
             {
               "description": "Mid-turn assistant text (for example preamble/progress narration).\n\nAdditional tool calls or assistant output may follow before turn completion.",
@@ -614,7 +815,12 @@
               "type": "string"
             },
             {
-              "description": "The assistant's terminal answer text for the current turn.",
+              "description": "Stable answer text that may be followed by more assistant output or tools.",
+              "enum": ["partial_answer"],
+              "type": "string"
+            },
+            {
+              "description": "The assistant's declared terminal answer text for the current turn.",
               "enum": ["final_answer"],
               "type": "string"
             }
@@ -642,6 +848,18 @@
                 },
                 {
                   "description": "Open-ended classification; clients must accept categories added by Responses.",
+                  "type": "null"
+                }
+              ]
+            },
+            "reviewTarget": {
+              "anyOf": [
+                {
+                  "description": "Opaque server-issued block target. Presence alone does not enable target-based continuation.",
+                  "type": "string"
+                },
+                {
+                  "description": "Opaque server-issued block target. Presence alone does not enable target-based continuation.",
                   "type": "null"
                 }
               ]
@@ -876,6 +1094,8 @@
             "edu",
             "edu_plus",
             "edu_pro",
+            "sci",
+            "sci_plus",
             "unknown"
           ],
           "type": "string"
@@ -1081,6 +1301,18 @@
                 },
                 {
                   "description": "Optional role (agent_role) assigned to an AgentControl-spawned sub-agent.",
+                  "type": "null"
+                }
+              ]
+            },
+            "attachedToThreadId": {
+              "anyOf": [
+                {
+                  "description": "Parent that owns this persisted attached thread, independent of fork or spawn lineage.",
+                  "type": "string"
+                },
+                {
+                  "description": "Parent that owns this persisted attached thread, independent of fork or spawn lineage.",
                   "type": "null"
                 }
               ]
@@ -1343,6 +1575,7 @@
         "ThreadHistoryMode": { "enum": ["legacy", "paginated"], "type": "string" },
         "ThreadId": { "type": "string" },
         "ThreadItem": {
+          "description": "A thread item and its recorded lifecycle times. The payload stays flat on the wire.",
           "oneOf": [
             {
               "properties": {
@@ -1385,6 +1618,10 @@
                 "id": { "type": "string" },
                 "memoryCitation": {
                   "anyOf": [{ "$ref": "#/definitions/MemoryCitation" }, { "type": "null" }],
+                  "default": null
+                },
+                "moderation": {
+                  "anyOf": [{ "$ref": "#/definitions/AgentMessageModeration" }, { "type": "null" }],
                   "default": null
                 },
                 "phase": {
@@ -1763,6 +2000,22 @@
                 "agentThreadId": { "type": "string" },
                 "id": { "type": "string" },
                 "kind": { "$ref": "#/definitions/SubAgentActivityKind" },
+                "model": {
+                  "anyOf": [
+                    {
+                      "description": "Resolved model at sub-agent creation; absent from older records and other activities.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Resolved model at sub-agent creation; absent from older records and other activities.",
+                      "type": "null"
+                    }
+                  ]
+                },
+                "reasoningEffort": {
+                  "anyOf": [{ "$ref": "#/definitions/ReasoningEffort" }, { "type": "null" }],
+                  "description": "Resolved reasoning effort at sub-agent creation, when known."
+                },
                 "type": {
                   "enum": ["subAgentActivity"],
                   "title": "SubAgentActivityThreadItemType",
@@ -1832,13 +2085,46 @@
               "type": "object"
             },
             {
+              "anyOf": [
+                {
+                  "properties": { "fileId": { "type": "string" } },
+                  "required": ["fileId"],
+                  "title": "FileIdThreadItem",
+                  "type": "object"
+                },
+                {
+                  "properties": { "result": { "type": "string" } },
+                  "required": ["result"],
+                  "title": "ResultThreadItem",
+                  "type": "object"
+                }
+              ],
+              "description": "Either inline generated-image data or its durable attachment-store identity.\n\n`File` must remain first so rollouts written during the migration, which contain both an empty `result` and a `fileId`, retain the file reference when deserialized.",
               "properties": {
                 "failure": {
                   "anyOf": [{ "$ref": "#/definitions/ImageGenerationFailure" }, { "type": "null" }],
                   "default": null
                 },
+                "generationId": {
+                  "anyOf": [
+                    {
+                      "default": null,
+                      "description": "Image generation identifier for the generated image, when provided by the image backend.",
+                      "type": "string"
+                    },
+                    {
+                      "default": null,
+                      "description": "Image generation identifier for the generated image, when provided by the image backend.",
+                      "type": "null"
+                    }
+                  ]
+                },
                 "id": { "type": "string" },
-                "result": { "type": "string" },
+                "inputImages": {
+                  "description": "Observed local inputs for a completed generation, absent on older items.",
+                  "items": { "$ref": "#/definitions/ImageGenerationInputImage" },
+                  "type": "array"
+                },
                 "revisedPrompt": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
                 "savedPath": {
                   "anyOf": [{ "$ref": "#/definitions/AbsolutePathBuf" }, { "type": "null" }]
@@ -1856,7 +2142,7 @@
                   "type": "string"
                 }
               },
-              "required": ["id", "result", "status", "type"],
+              "required": ["id", "status", "type"],
               "title": "ImageGenerationThreadItem",
               "type": "object"
             },
@@ -1901,7 +2187,42 @@
               "title": "ContextCompactionThreadItem",
               "type": "object"
             }
-          ]
+          ],
+          "properties": {
+            "completedAtMs": {
+              "anyOf": [
+                {
+                  "default": null,
+                  "description": "Unix timestamp in milliseconds when the item completed, if recorded.",
+                  "format": "int64",
+                  "type": "integer"
+                },
+                {
+                  "default": null,
+                  "description": "Unix timestamp in milliseconds when the item completed, if recorded.",
+                  "format": "int64",
+                  "type": "null"
+                }
+              ]
+            },
+            "startedAtMs": {
+              "anyOf": [
+                {
+                  "default": null,
+                  "description": "Unix timestamp in milliseconds when the item started, if recorded.",
+                  "format": "int64",
+                  "type": "integer"
+                },
+                {
+                  "default": null,
+                  "description": "Unix timestamp in milliseconds when the item started, if recorded.",
+                  "format": "int64",
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "type": "object"
         },
         "ThreadSection": {
           "description": "An independently persisted, user-visible thread section.",
@@ -2024,6 +2345,18 @@
               "allOf": [{ "$ref": "#/definitions/TurnItemsView" }],
               "default": "full",
               "description": "Describes how much of `items` has been loaded for this turn."
+            },
+            "rootTurnId": {
+              "anyOf": [
+                {
+                  "description": "ID of the first turn in the chain of work that led to this turn. Pass this as `rootTurnId` when starting work on behalf of this turn. May be null in older history or a `review/start` response.",
+                  "type": "string"
+                },
+                {
+                  "description": "ID of the first turn in the chain of work that led to this turn. Pass this as `rootTurnId` when starting work on behalf of this turn. May be null in older history or a `review/start` response.",
+                  "type": "null"
+                }
+              ]
             },
             "startedAt": {
               "anyOf": [
@@ -2158,11 +2491,24 @@
               "type": "object"
             },
             {
+              "anyOf": [
+                {
+                  "properties": { "url": { "type": "string" } },
+                  "required": ["url"],
+                  "title": "UrlUserInput",
+                  "type": "object"
+                },
+                {
+                  "properties": { "fileId": { "type": "string" } },
+                  "required": ["fileId"],
+                  "title": "FileIdUserInput",
+                  "type": "object"
+                }
+              ],
               "properties": {
-                "type": { "enum": ["audio"], "title": "AudioUserInputType", "type": "string" },
-                "url": { "type": "string" }
+                "type": { "enum": ["audio"], "title": "AudioUserInputType", "type": "string" }
               },
-              "required": ["type", "url"],
+              "required": ["type"],
               "title": "AudioUserInput",
               "type": "object"
             },
